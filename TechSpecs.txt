@@ -1,0 +1,54 @@
+ТЕХНИЧЕСКОЕ ЗАДАНИЕ (ТЗ) И АРХИТЕКТУРНЫЙ ОТЧЕТПроект: MINIMALISM.AI (Production Version) — Микросервисная система анализа искусств
+1. ОБЩЕЕ ОПИСАНИЕ СИСТЕМЫСистема предназначена для высоконагруженного анализа изображений произведений искусства. Основной функционал включает автоматическое определение художественного стиля (с фокусом на Минимализм), декомпозицию вероятностей по 27 историческим стилям, извлечение цветовой палитры и выдачу топ-6 визуально схожих картин из локальной базы данных (56 000+ объектов WikiArt).Ключевой архитектурный принцип: Полный отказ от синхронной обработки тяжелых AI-моделей на веб-сервере. Бизнес-логика, хранение данных и оркестрация процессов реализуются на Java (Spring Boot). Математические вычисления и инференс нейросетей реализуются на Python (PyTorch). Взаимодействие между ними строится асинхронно через брокер сообщений RabbitMQ.
+2. КОМПОНЕНТЫ И МИКРОСЕРВИСЫ СИСТЕМЫ
+2.1. API Gateway / Основной бэкенд-сервис (Java, Spring Boot)Центральный оркестратор системы, управляющий жизненным циклом запросов.Стек: Java 17+, Spring Boot 3.x, Spring Security (JWT), Spring Data JPA, AWS SDK для Java (S3Client), Spring AMQP (RabbitMQ).Обязанности:Прием multipart/form-data запросов от Фронтенда (бинарный файл изображения + параметры).Валидация входящих файлов (проверка размера < 10 МБ, проверка MIME-типа изображения).Загрузка оригиналов изображений в хранилище MinIO (S3-compatible) с генерацией уникального UUID для файла.Создание записи в PostgreSQL в таблице analysis_tasks со статусом PROCESSING.Публикация сообщения-задачи в брокер RabbitMQ.Реализация REST API эндпоинтов для проверки статуса задач и отдачи истории анализов пользователям.Прием ответов от RabbitMQ от Python-воркера и выполнение внутрибазового векторного поиска референсов.
+2.2. ML-Worker / Вычислительный сервис (Python)Изолированный бэкграунд-демон для работы с моделями искусственного интеллекта.Стек: Python 3.10+, PyTorch, Transformers (модель openai/clip-vit-large-patch14), Scikit-Learn (KMeans и сохраненный файл классификатора minimalism_classifier.pkl), Pillow, Pika (клиент RabbitMQ), Requests.Обязанности:Постоянное прослушивание очереди art.analysis.queue в RabbitMQ.Получение URL картинки из S3, скачивание её в буфер оперативной памяти.Извлечение признаков (эмбеддинга) через Image Encoder модели CLIP (размерность вектора — 768 чисел). L2-нормализация вектора.Классификация стиля: передача вектора в обученную модель Мультиклассовой Логистической Регрессии для расчета распределения вероятностей по 27 классам.Извлечение палитры: сжатие изображения и кластеризация пикселей методом K-Means ($N=5$ центроидов) с переводом координат в HEX-формат (#RRGGBB).Упаковка данных в JSON и отправка ответа в очередь art.results.queue.
+2.3. Брокер сообщений (RabbitMQ)Транспортный уровень для разграничения синхронной и асинхронной логики.Настройка:Обменник (Exchange): art.exchange (тип: direct).Очередь задач: art.analysis.queue (связана с ключом art.analyze).Очередь ответов: art.results.queue (связана с ключом art.result).
+2.4. Хранилище объектов (MinIO (S3-compatible) / MinIO)Единое распределенное хранилище файлов, доступное для всех инстансов Java и Python.Структура бакета:dataset/ — неизменяемый архив 56 000+ картин WikiArt, используемый для поиска референсов.uploads/ — папка с уникальными UUID-именами изображений, загруженных пользователями в реальном времени.
+2.5. База данных (PostgreSQL + расширение pgvector)Единый источник правды, объединяющий реляционные бизнес-данные и векторные индексы для ИИ.Настройка: Обязательная установка расширения CREATE EXTENSION IF NOT EXISTS vector; и создание пространственного индекса HNSW для ускорения косинусного поиска.
+3. КОНТРАКТЫ ДАННЫХ И СХЕМЫ ХРАНЕНИЯ3.1. Схема Таблиц PostgreSQLSQL-- Таблица статической базы данных WikiArt для поиска совпадений
+CREATE TABLE artworks (
+    id SERIAL PRIMARY KEY,
+    artist VARCHAR(255) NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    style VARCHAR(100) NOT NULL,
+    image_s3_url TEXT NOT NULL,
+    embedding vector(768) NOT NULL -- Хранение вектора CLIP-large
+);
+
+-- Индекс HNSW для мгновенного поиска по 56 000+ записям
+CREATE INDEX artworks_embedding_hnsw_idx ON artworks
+USING hnsw (embedding vector_cosine_ops);
+
+-- Таблица истории запросов пользователей и статусов задач
+CREATE TABLE analysis_tasks (
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL, -- Привязка к пользователю из Spring Security
+    image_s3_url TEXT NOT NULL,
+    status VARCHAR(50) NOT NULL, -- PROCESSING, COMPLETED, FAILED
+    palette text[], -- Массив из 5 HEX-цветов
+    style_breakdown JSONB, -- Результаты декомпозиции стилей
+    matches integer[], -- Массив из ID топ-6 похожих картин из artworks
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
+);
+CREATE INDEX idx_tasks_user_id ON analysis_tasks(user_id);
+3.2. Контракты сообщений в RabbitMQ (DTO в формате JSON)Java $\rightarrow$ Python (Очередь art.analysis.queue):JSON{
+  "taskId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "imageUrl": "https://my-art-bucket.s3.amazonaws.com/uploads/f47ac10b.jpg",
+  "mode": "auto"
+}
+Python $\rightarrow$ Java (Очередь art.results.queue):JSON{
+  "taskId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "embedding": [0.0124, -0.0451, 0.0892, "... всего 768 чисел ...", -0.0112],
+  "palette": ["#030303", "#f5f5f5", "#555555", "#aaaaaa", "#bbbbbb"],
+  "styleBreakdown": [
+    {"style": "Минимализм", "prob": "85.4%"},
+    {"style": "Живопись цветового поля", "prob": "12.1%"},
+    {"style": "Кубизм", "prob": "2.5%"}
+  ]
+}
+4. ПОЛНЫЙ ЖИЗНЕННЫЙ ЦИКЛ ЗАПРОСА (ПO ФЕНШУЮ)Frontend: Пользователь загружает изображение. React шлет POST /api/v1/art/analyze (с JWT-токеном в Header).Java (Gateway): Авторизует юзера, считывает поток байт, генерирует task_id (UUID), отправляет файл в MinIO (S3-compatible).Java (Gateway): Записывает в Postgres строку задачи со статусом PROCESSING. Мгновенно возвращает Фронтенду ответ 202 Accepted с task_id. (Фронтенд включает анимацию загрузки).Java (Gateway): Публикует сообщение в RabbitMQ в очередь задач.Python (Worker): Извлекает таску из RabbitMQ, качает файл из S3, вычисляет эмбеддинг через CLIP, прогоняет через классификатор и K-Means. Отправляет JSON-ответ обратно в RabbitMQ.Java (Gateway): Слушает очередь ответов. Получив JSON от Python, берет embedding и выполняет Native SQL-запрос к Postgres:SQLSELECT id FROM artworks ORDER BY embedding <=> cast(:queryEmbedding as vector) ASC LIMIT 6;
+Java (Gateway): Обновляет строку в таблице analysis_tasks: вшивает полученные matches (ID референсов), palette, style_breakdown и переводит статус в COMPLETED.Фронтенд / Пользователь: Фронтенд раз в 500мс опрашивает GET /api/v1/art/tasks/{id} (или ожидает пуша по WebSocket). Обнаружив статус COMPLETED, запрашивает итоговый JSON и рендерит интерфейс результатов.
+5. ПЛАН РАЗВЕРТЫВАНИЯ И ОПТИМИЗАЦИИ (PRODUCTION-READY)Контейнеризация (Docker): Каждый компонент упаковывается в свой Docker-образ. Создается общий файл docker-compose.yml для локального тестирования инфраструктуры (Java-app, Python-worker, Postgres с pgvector, RabbitMQ, локальный эмулятор S3 — MinIO).Пул соединений (HikariCP): На уровне Spring Boot настраивается пул коннектов к Postgres (по умолчанию в Spring Boot 3), ограничивающий одновременные соединения, чтобы защитить БД от перегрузки при частых микрозапросах.Кэширование: На уровне Java-Gateway внедряется Redis для кэширования истории анализов и профилей пользователей, снижая количество прямых чтений из PostgreSQL.Горизонтальное масштабирование: В случае роста нагрузок, Docker-контейнеры с Java (API Gateway) размножаются на копеечных CPU-серверах за балансировщиком нагрузки (Nginx). Python-воркеры масштабируются отдельно — на серверах с выделенной GPU (видеокартой) для утилизации мощностей PyTorch.
+6. ЭТАПЫ РЕАЛИЗАЦИИ ДЛЯ КОМАНДЫЭтап 1: Настройка инфраструктуры (Поднятие Docker с Postgres+pgvector, RabbitMQ, MinIO). Заливка датасета WikiArt в S3 и парсинг его векторов в таблицу artworks.Этап 2: Написание Java API Gateway (Эндпоинты, Интеграция с С3, Spring Security, Логика RabbitMQ).Этап 3: Рефакторинг Python-кода: превращение текущих Flask-скриптов в обработчик сообщений RabbitMQ (без HTTP-интерфейса).Этап 4: Интеграция слоев, тестирование сквозного асинхронного пайплайна, написание нового фронтенда на React/Vue.
