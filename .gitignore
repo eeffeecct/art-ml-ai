@@ -154,7 +154,7 @@ cython_debug/
 
 # Project specific data files (Heavy)
 embeddings.npz
-minimalism_classifier.pkl
+# minimalism_classifier.pkl (Essential for production)
 ОПР Проект.pdf
 
 # Dataset directories (Very Heavy)

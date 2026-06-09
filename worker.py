@@ -138,7 +138,8 @@ def process_task(ch, method, properties, body):
             style_breakdown = [
                 {
                     "style": STYLE_TRANSLATIONS.get(s, s), 
-                    "prob": f"{p:.1%}"
+                    "prob": f"{p:.1%}",
+                    "val": float(p * 100) 
                 } for s, p in style_probs[:5]
             ]
 

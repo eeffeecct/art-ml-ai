@@ -1,11 +1,9 @@
 torch
-torchvision
 transformers
 scikit-learn
 Pillow
-matplotlib
 numpy
-tqdm
 pika
 requests
 joblib
+python-dotenv
