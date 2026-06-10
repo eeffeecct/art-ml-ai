@@ -1,9 +1,13 @@
-torch
-transformers
-scikit-learn
-Pillow
-numpy
-pika
-requests
-joblib
-python-dotenv
+# Pinned to the versions that the trained minimalism_classifier.pkl was built/validated with.
+# Changing torch/transformers/scikit-learn versions can break model loading or shift
+# CLIP embeddings (degrading similarity search), so keep these pinned.
+torch==2.12.0
+transformers==5.10.2
+scikit-learn==1.9.0
+scipy==1.17.1
+numpy==2.4.6
+Pillow==12.2.0
+pika==1.4.1
+requests==2.34.2
+joblib==1.5.3
+python-dotenv==1.2.2
