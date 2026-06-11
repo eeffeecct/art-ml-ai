@@ -7,7 +7,11 @@ from tqdm import tqdm
 
 # Configuration
 EXCLUDE_DIRS = ['.git', '.idea', 'templates', 'uploads', '__pycache__']
-MODEL_NAME = "openai/clip-vit-large-patch14"
+# CLIP backbone. Keep IDENTICAL to worker.py's CLIP_MODEL — classifier, artworks vectors
+# and the query must all live in the same embedding space. Upgrade lever: set
+# CLIP_MODEL=openai/clip-vit-large-patch14-336 (sharper brushstroke detail) and re-extract
+# everything. Projection dim stays 768, so the pgvector schema does not change.
+MODEL_NAME = os.getenv('CLIP_MODEL', 'openai/clip-vit-large-patch14')
 OUTPUT_FILE = "embeddings.npz"
 
 def get_style_dirs():

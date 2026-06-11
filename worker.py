@@ -27,7 +27,14 @@ ROUTING_KEY_RESULTS = 'art.result'
 QUEUE_TASKS = 'art.analysis.queue'
 QUEUE_RESULTS = 'art.results.queue'
 MODEL_FILE = "minimalism_classifier.pkl"
-CLIP_MODEL_NAME = "openai/clip-vit-large-patch14"
+# Must match extract_features.py's CLIP_MODEL and the model that built the artworks vectors.
+# Upgrade: CLIP_MODEL=openai/clip-vit-large-patch14-336 (then re-extract + reload the DB).
+CLIP_MODEL_NAME = os.getenv('CLIP_MODEL', 'openai/clip-vit-large-patch14')
+
+# Blend weight for style classification: trained head vs zero-shot CLIP text prior.
+# 1.0 = pure trained head (zero-shot off). 0.85 = 85% trained + 15% zero-shot prior.
+# Override at runtime with the CLF_WEIGHT env var (e.g. CLF_WEIGHT=1.0 to A/B compare).
+CLF_WEIGHT = float(os.getenv('CLF_WEIGHT', '0.85'))
 
 STYLE_TRANSLATIONS = {
     "Abstract_Expressionism": "Абстрактный экспрессионизм",
@@ -83,6 +90,31 @@ else:
     # publishing "successful" results with an empty style breakdown.
     print(f"CRITICAL: {MODEL_FILE} not found! Cannot start without the classifier.")
     sys.exit(1)
+
+
+# Precompute one zero-shot text embedding per style from CLIP's text tower. Blended with
+# the trained head at inference (see CLF_WEIGHT) to steady predictions on rare styles.
+ZEROSHOT_TEMPLATES = [
+    "a painting in the style of {s}",
+    "an example of {s} art",
+    "a {s} style artwork",
+]
+text_embeds = None
+logit_scale = 1.0
+if CLF_WEIGHT < 1.0:
+    print("Precomputing zero-shot text embeddings...")
+    _rows = []
+    for _raw in style_classes:
+        _human = str(_raw).replace('_', ' ').lower()
+        _prompts = [t.format(s=_human) for t in ZEROSHOT_TEMPLATES]
+        _tin = processor(text=_prompts, return_tensors="pt", padding=True).to(device)
+        with torch.no_grad():
+            _tfeat = model.get_text_features(**_tin)
+        _tfeat = _tfeat / _tfeat.norm(p=2, dim=-1, keepdim=True)
+        _rows.append(_tfeat.mean(dim=0))
+    text_embeds = torch.stack(_rows)
+    text_embeds = text_embeds / text_embeds.norm(p=2, dim=-1, keepdim=True)
+    logit_scale = model.logit_scale.exp().item()
 
 
 def get_colors(image, num_colors=5):
@@ -148,9 +180,16 @@ def process_task(ch, method, properties, body):
         image_features = image_features / image_features.norm(p=2, dim=-1, keepdim=True)
         embedding = image_features.cpu().numpy().flatten().tolist()
 
-        # 3. Classify Style
+        # 3. Classify Style (trained head, optionally blended with the zero-shot prior)
         query_emb = np.array(embedding).reshape(1, -1)
         probs = clf.predict_proba(query_emb)[0]
+
+        if text_embeds is not None:
+            sims = (image_features @ text_embeds.T).squeeze(0)
+            zs_probs = torch.softmax(sims * logit_scale, dim=-1).cpu().numpy()
+            probs = CLF_WEIGHT * probs + (1.0 - CLF_WEIGHT) * zs_probs
+            probs = probs / probs.sum()
+
         style_probs = sorted(zip(style_classes, probs), key=lambda x: x[1], reverse=True)
 
         style_breakdown = [
