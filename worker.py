@@ -32,9 +32,10 @@ MODEL_FILE = "minimalism_classifier.pkl"
 CLIP_MODEL_NAME = os.getenv('CLIP_MODEL', 'openai/clip-vit-large-patch14')
 
 # Blend weight for style classification: trained head vs zero-shot CLIP text prior.
-# 1.0 = pure trained head (zero-shot off). 0.85 = 85% trained + 15% zero-shot prior.
-# Override at runtime with the CLF_WEIGHT env var (e.g. CLF_WEIGHT=1.0 to A/B compare).
-CLF_WEIGHT = float(os.getenv('CLF_WEIGHT', '0.85'))
+# Default 1.0 = pure trained head. The MLP head is strong (~75% top-1), so the spiky
+# zero-shot prior tends to hurt in-distribution and is left OFF by default. Try
+# CLF_WEIGHT=0.9 if the zero-shot prior helps on real / out-of-distribution uploads.
+CLF_WEIGHT = float(os.getenv('CLF_WEIGHT', '1.0'))
 
 STYLE_TRANSLATIONS = {
     "Abstract_Expressionism": "Абстрактный экспрессионизм",

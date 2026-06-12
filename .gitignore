@@ -154,6 +154,8 @@ cython_debug/
 
 # Project specific data files (Heavy)
 embeddings.npz
+embeddings_336.npz
+art_emb*.zip
 # minimalism_classifier.pkl (Essential for production)
 ОПР Проект.pdf
 
