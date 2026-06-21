@@ -136,6 +136,25 @@ def get_colors(image, num_colors=5):
         return ['#000000'] * num_colors
 
 
+# Warm up the inference pipeline at startup. PyTorch lazily initializes its CPU kernels
+# and thread pool on the FIRST forward pass, which for CLIP ViT-Large is ~5-10s. Running
+# one dummy image through the exact same path here pays that cost at boot (where nobody is
+# waiting) instead of on the user's first real upload. Also warms the sklearn head + KMeans.
+def warmup():
+    print("Warming up CLIP (first CPU forward pass is slow)...")
+    try:
+        dummy = Image.new("RGB", (224, 224), (127, 127, 127))
+        inputs = processor(images=dummy, return_tensors="pt").to(device)
+        with torch.no_grad():
+            feat = model.get_image_features(**inputs)
+        feat = feat / feat.norm(p=2, dim=-1, keepdim=True)
+        clf.predict_proba(feat.cpu().numpy().reshape(1, -1))
+        get_colors(dummy)
+        print("Warm-up complete.")
+    except Exception as e:
+        print(f"Warm-up skipped: {e}")
+
+
 def publish_failure(ch, task_id, error_message):
     """Tell Java the task failed so it is marked FAILED instead of stuck PROCESSING."""
     failure = {"taskId": task_id, "status": "FAILED", "error": str(error_message)[:500]}
@@ -284,4 +303,5 @@ def main():
 
 
 if __name__ == "__main__":
+    warmup()
     main()
